@@ -77,7 +77,7 @@ type Review struct {
 }
 
 // DB ห่อ *sql.DB เพื่อรองรับทั้ง SQLite (ในเครื่อง) และ PostgreSQL (บนโฮส)
-// โดยแปลง placeholder ? เป็น $1,$2,... อัตโนมัติเมื่อใช้ PostgreSQL
+// โดยแปลง placeholder ? เป็น \$1,\$2,... อัตโนมัติเมื่อใช้ PostgreSQL
 type DB struct {
 	*sql.DB
 	pg bool
@@ -139,6 +139,18 @@ CREATE TABLE IF NOT EXISTS reviews(
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   rating INTEGER NOT NULL, comment TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS orders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  total_price REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS order_items(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  menu_item_id INTEGER NOT NULL REFERENCES menu_items(id),
+  quantity INTEGER NOT NULL,
+  price REAL NOT NULL);
 `
 
 const pgNow = "(to_char(now() AT TIME ZONE 'Asia/Bangkok','YYYY-MM-DD HH24:MI'))"
@@ -171,6 +183,18 @@ CREATE TABLE IF NOT EXISTS reviews(
   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   rating INTEGER NOT NULL, comment TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT ` + pgNow + `);
+CREATE TABLE IF NOT EXISTS orders(
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  total_price DOUBLE PRECISION NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT ` + pgNow + `);
+CREATE TABLE IF NOT EXISTS order_items(
+  id BIGSERIAL PRIMARY KEY,
+  order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  menu_item_id BIGINT NOT NULL REFERENCES menu_items(id),
+  quantity INTEGER NOT NULL,
+  price DOUBLE PRECISION NOT NULL);
 `
 
 func env(k, d string) string {
@@ -242,6 +266,7 @@ func main() {
 	mux.HandleFunc("GET /reviews", app.reviews)
 	mux.HandleFunc("POST /reviews", app.auth(app.reviewCreate))
 	mux.HandleFunc("POST /reviews/{id}/delete", app.auth(app.reviewDelete))
+	mux.HandleFunc("POST /orders", app.auth(app.orderCreate))
 	mux.HandleFunc("GET /admin/menu", app.admin(app.menuList))
 	mux.HandleFunc("POST /admin/menu", app.admin(app.menuCreate))
 	mux.HandleFunc("POST /admin/menu/{id}/delete", app.admin(app.menuDelete))
@@ -408,10 +433,40 @@ func (a *App) menuItems() []MenuItem {
 	}
 	return out
 }
+
 func (a *App) home(w http.ResponseWriter, r *http.Request) {
 	p := a.page(w, r)
 	p.Data = a.menuItems()
 	a.render(w, "home", p, 200)
+}
+
+// ---------- ฟังก์ชันสั่งอาหาร ----------
+
+func (a *App) orderCreate(w http.ResponseWriter, r *http.Request, u *User) {
+	menuID, _ := strconv.ParseInt(r.PostFormValue("menu_id"), 10, 64)
+	qty, _ := strconv.Atoi(r.PostFormValue("quantity"))
+	if qty < 1 {
+		qty = 1
+	}
+
+	var price float64
+	err := a.db.QueryRow(`SELECT price FROM menu_items WHERE id=?`, menuID).Scan(&price)
+	if err != nil {
+		http.Error(w, "ไม่พบเมนูนี้", http.StatusBadRequest)
+		return
+	}
+
+	total := price * float64(qty)
+	res, err := a.db.Exec(`INSERT INTO orders(user_id, total_price) VALUES(?, ?)`, u.ID, total)
+	if err != nil {
+		a.serverErr(w, err)
+		return
+	}
+
+	orderID, _ := res.LastInsertId()
+	a.db.Exec(`INSERT INTO order_items(order_id, menu_item_id, quantity, price) VALUES(?, ?, ?, ?)`, orderID, menuID, qty, price)
+
+	http.Redirect(w, r, "/dashboard?ok=1", http.StatusSeeOther)
 }
 
 // ---------- สมัคร / เข้าสู่ระบบ ----------
@@ -597,7 +652,6 @@ func (a *App) resCreate(w http.ResponseWriter, r *http.Request, u *User) {
 	http.Redirect(w, r, "/dashboard?ok=1", http.StatusSeeOther)
 }
 
-// โหลดการจองและตรวจสิทธิ์ความเป็นเจ้าของ (ผู้ใช้ A แก้/ลบของ B ไม่ได้)
 func (a *App) ownedRes(w http.ResponseWriter, r *http.Request, u *User, adminOK bool) (Reservation, bool) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	x, err := a.getRes(id)
@@ -641,7 +695,7 @@ func (a *App) resUpdate(w http.ResponseWriter, r *http.Request, u *User) {
 }
 
 func (a *App) resDelete(w http.ResponseWriter, r *http.Request, u *User) {
-	x, ok := a.ownedRes(w, r, u, true) // แอดมินลบได้
+	x, ok := a.ownedRes(w, r, u, true)
 	if !ok {
 		return
 	}
