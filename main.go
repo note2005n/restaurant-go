@@ -353,6 +353,7 @@ func (a *App) seed() {
 			{Name: "ตำทะเล", Description: "ส้มตำรสเด็ดจัดจ้าน คลุกเคล้าวัตถุดิบทะเลสดใหม่ ทั้งกุ้ง ปลาหมึก เนื้อเด้ง รสชาติเปรี้ยว เผ็ด แซ่บถึงใจ", Price: 45, Category: "ยำ/ตำ", ImageURL: "/static/ตำทะเล.jpg"},
 			{Name: "ตำป่า", Description: "ส้มตำปลาร้าเข้มข้นรสจัดจ้าน เครื่องแน่นจัดเต็ม แซ่บนัวถึงใจ", Price: 45, Category: "ยำ/ตำ", ImageURL: "/static/ตำป่า.jpg"},
 			{Name: "ยำวุ้นเส้นหมูยอ", Description: "วุ้นเส้นเหนียวนุ่ม ยำคลุกเคล้ากับหมูยออย่างดี น้ำยำรสชาติจัดจ้าน", Price: 45, Category: "ยำ/ตำ", ImageURL: "/static/ยำวุ้นเส้นหมูยอ.jpg"},
+			{Name: "โกโก้เย็น", Description: "โกโก้เข้มข้น หอมมัน รสชาติหวานกลมกล่อมกำลังดี ดื่มแล้วสดชื่นชื่นใจ", Price: 45, Category: "เครื่องดื่ม", ImageURL: "/static/โกโก้เย็น.jpg"},
 		} {
 			a.db.Exec(`INSERT INTO menu_items(name,description,price,category,image_url) VALUES(?,?,?,?,?)`, m.Name, m.Description, m.Price, m.Category, m.ImageURL)
 		}
