@@ -226,7 +226,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	mux.HandleFunc("GET /{$}", app.home)
 	mux.HandleFunc("GET /register", app.registerForm)
 	mux.HandleFunc("POST /register", app.register)
