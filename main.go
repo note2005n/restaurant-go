@@ -252,6 +252,15 @@ func main() {
 		"ต้มยำกุ้งน้ำข้น":       "/static/ต้มยำกุ้งน้ำข้น.jpg",
 		"ส้มตำไทย":              "/static/ส้มตำไทย.jpg",
 		"ชาไทยเย็น":             "/static/images.jpg",
+		"ชาเขียว":               "/static/ชาเขียว.jpg",
+		"ชาเขียวเย็น":           "/static/ชาเขียว.jpg",
+		"ข้าวผัดหมู":            "/static/ข้าวผัดหมู.jpg",
+		"ข้าวไข่ข้นกุ้ง":        "/static/ไข่ข้นกุ้ง.jpg",
+		"ข้าวไข่ข้นหมูสับ":      "/static/ไข่ข้นหมูสับ.jpg",
+		"ต้มแซ่บกระดูกหมู":      "/static/ต้มแซ่บกระดูกหมู.jpg",
+		"ตำทะเล":                "/static/ตำทะเล.jpg",
+		"ตำป่า":                 "/static/ตำป่า.jpg",
+		"ยำวุ้นเส้นหมูยอ":       "/static/ยำวุ้นเส้นหมูยอ.jpg",
 	} {
 		db.Exec(`UPDATE menu_items SET image_url=? WHERE name=? AND image_url=''`, img, name)
 	}
@@ -310,6 +319,7 @@ func main() {
 	mux.HandleFunc("GET /admin/menu", app.admin(app.menuList))
 	mux.HandleFunc("POST /admin/menu", app.admin(app.menuCreate))
 	mux.HandleFunc("POST /admin/menu/{id}/delete", app.admin(app.menuDelete))
+	mux.HandleFunc("POST /admin/menu/{id}/image", app.admin(app.menuImage))
 
 	srv := &http.Server{
 		Addr: ":" + env("PORT", "8080"), Handler: app.secure(mux),
@@ -357,7 +367,7 @@ func (a *App) secure(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "same-origin")
-		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if r.Method == http.MethodPost {
 			c, err := r.Cookie("csrf")
@@ -989,7 +999,38 @@ func (a *App) menuCreate(w http.ResponseWriter, r *http.Request, u *User) {
 		http.Error(w, "ข้อมูลเมนูไม่ถูกต้อง", http.StatusBadRequest)
 		return
 	}
-	a.db.Exec(`INSERT INTO menu_items(name,description,price,category) VALUES(?,?,?,?)`, name, desc, price, cat)
+	img, ok := cleanImageURL(r.PostFormValue("image_url"))
+	if !ok {
+		http.Error(w, "ลิงก์รูปต้องขึ้นต้นด้วย /static/ หรือ https://", http.StatusBadRequest)
+		return
+	}
+	a.db.Exec(`INSERT INTO menu_items(name,description,price,category,image_url) VALUES(?,?,?,?,?)`, name, desc, price, cat, img)
+	http.Redirect(w, r, "/admin/menu?ok=1", http.StatusSeeOther)
+}
+
+// รับเฉพาะรูปในโฟลเดอร์ /static/ หรือลิงก์ https:// (กัน javascript: และลิงก์แปลกๆ)
+func cleanImageURL(v string) (string, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", true
+	}
+	if len(v) > 300 || strings.Contains(v, "..") || strings.ContainsAny(v, "\"'<>\n\r") {
+		return "", false
+	}
+	if strings.HasPrefix(v, "/static/") || strings.HasPrefix(v, "https://") {
+		return v, true
+	}
+	return "", false
+}
+
+func (a *App) menuImage(w http.ResponseWriter, r *http.Request, u *User) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	img, ok := cleanImageURL(r.PostFormValue("image_url"))
+	if !ok {
+		http.Error(w, "ลิงก์รูปต้องขึ้นต้นด้วย /static/ หรือ https://", http.StatusBadRequest)
+		return
+	}
+	a.db.Exec(`UPDATE menu_items SET image_url=? WHERE id=?`, img, id)
 	http.Redirect(w, r, "/admin/menu?ok=1", http.StatusSeeOther)
 }
 

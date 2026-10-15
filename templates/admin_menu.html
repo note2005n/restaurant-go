@@ -7,10 +7,21 @@
 <label>หมวดหมู่</label><input name="category" required maxlength="50">
 <label>รายละเอียด</label><input name="description" maxlength="300">
 <label>ราคา (บาท)</label><input type="number" step="1" min="0" name="price" required>
+<label>รูปภาพ (ไม่บังคับ) เช่น /static/ชื่อไฟล์.jpg หรือลิงก์ https://...</label>
+<input name="image_url" maxlength="300" placeholder="/static/ข้าวผัดหมู.jpg">
 <button class="btn">เพิ่มเมนู</button>
 </form>
-<div class="card table"><table><tr><th>เมนู</th><th>หมวด</th><th>ราคา</th><th></th></tr>
-{{range .Data}}<tr><td>{{.Name}}</td><td>{{.Category}}</td><td>{{printf "%.0f" .Price}}</td>
+<div class="card table"><table><tr><th>รูป</th><th>เมนู</th><th>หมวด</th><th>ราคา</th><th>ลิงก์รูป</th><th></th></tr>
+{{range .Data}}<tr>
+<td>{{if .ImageURL}}<img src="{{.ImageURL}}" alt="" style="width:56px;height:42px;object-fit:cover;border-radius:6px">{{else}}-{{end}}</td>
+<td>{{.Name}}</td><td>{{.Category}}</td><td>{{printf "%.0f" .Price}}</td>
+<td>
+<form class="inline" method="post" action="/admin/menu/{{.ID}}/image" style="display:flex;gap:4px">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input name="image_url" value="{{.ImageURL}}" maxlength="300" style="min-width:200px">
+<button class="btn sm sec">บันทึกรูป</button>
+</form>
+</td>
 <td><form class="inline" method="post" action="/admin/menu/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm del">ลบ</button></form></td></tr>{{end}}
 </table></div>
 {{end}}
