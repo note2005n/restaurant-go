@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"database/sql"
@@ -240,6 +241,20 @@ func main() {
 			log.Fatal("migrate: ", err)
 		}
 	}
+	// เพิ่มคอลัมน์ image_url ให้ฐานข้อมูลเก่า (ถ้ามีอยู่แล้วจะ error ซึ่งไม่เป็นไร)
+	if db.pg {
+		db.Exec(`ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT ''`)
+	} else {
+		db.Exec(`ALTER TABLE menu_items ADD COLUMN image_url TEXT NOT NULL DEFAULT ''`)
+	}
+	for name, img := range map[string]string{
+		"ผัดกะเพราหมูสับไข่ดาว": "/static/กระเพรา.jpg",
+		"ต้มยำกุ้งน้ำข้น":       "/static/ต้มยำกุ้งน้ำข้น.jpg",
+		"ส้มตำไทย":              "/static/ส้มตำไทย.jpg",
+		"ชาไทยเย็น":             "/static/images.jpg",
+	} {
+		db.Exec(`UPDATE menu_items SET image_url=? WHERE name=? AND image_url=''`, img, name)
+	}
 	app.seed()
 	funcs := template.FuncMap{
 		"dt":    func(s string) string { return strings.Replace(s, " ", "T", 1) },
@@ -405,11 +420,15 @@ func (a *App) page(w http.ResponseWriter, r *http.Request) Page {
 }
 
 func (a *App) render(w http.ResponseWriter, name string, p Page, status int) {
+	var buf bytes.Buffer
+	if err := a.pages[name].ExecuteTemplate(&buf, "layout", p); err != nil {
+		log.Println("template error:", name, err)
+		http.Error(w, "แสดงหน้า "+name+" ไม่สำเร็จ (ดู log ของเซิร์ฟเวอร์)", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	if err := a.pages[name].ExecuteTemplate(w, "layout", p); err != nil {
-		log.Println("template:", err)
-	}
+	buf.WriteTo(w)
 }
 
 func (a *App) serverErr(w http.ResponseWriter, err error) {
@@ -448,24 +467,27 @@ func (a *App) orderCreate(w http.ResponseWriter, r *http.Request, u *User) {
 	if qty < 1 {
 		qty = 1
 	}
+	if qty > 50 {
+		qty = 50
+	}
 
 	var price float64
-	err := a.db.QueryRow(`SELECT price FROM menu_items WHERE id=?`, menuID).Scan(&price)
-	if err != nil {
+	if err := a.db.QueryRow(`SELECT price FROM menu_items WHERE id=?`, menuID).Scan(&price); err != nil {
 		http.Error(w, "ไม่พบเมนูนี้", http.StatusBadRequest)
 		return
 	}
 
-	total := price * float64(qty)
-	res, err := a.db.Exec(`INSERT INTO orders(user_id, total_price) VALUES(?, ?)`, u.ID, total)
-	if err != nil {
+	var orderID int64
+	if err := a.db.QueryRow(`INSERT INTO orders(user_id, total_price) VALUES(?, ?) RETURNING id`,
+		u.ID, price*float64(qty)).Scan(&orderID); err != nil {
 		a.serverErr(w, err)
 		return
 	}
-
-	orderID, _ := res.LastInsertId()
-	a.db.Exec(`INSERT INTO order_items(order_id, menu_item_id, quantity, price) VALUES(?, ?, ?, ?)`, orderID, menuID, qty, price)
-
+	if _, err := a.db.Exec(`INSERT INTO order_items(order_id, menu_item_id, quantity, price) VALUES(?, ?, ?, ?)`,
+		orderID, menuID, qty, price); err != nil {
+		a.serverErr(w, err)
+		return
+	}
 	http.Redirect(w, r, "/dashboard?ok=1", http.StatusSeeOther)
 }
 
