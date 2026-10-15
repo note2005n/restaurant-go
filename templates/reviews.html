@@ -1,0 +1,19 @@
+{{define "title"}}รีวิว{{end}}
+{{define "content"}}
+<h1>รีวิวจากลูกค้า</h1>
+{{if .User}}
+<form class="card" method="post" action="/reviews">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>คะแนน</label>
+<select name="rating"><option value="5">★★★★★</option><option value="4">★★★★☆</option><option value="3">★★★☆☆</option><option value="2">★★☆☆☆</option><option value="1">★☆☆☆☆</option></select>
+<label>ความคิดเห็น</label><textarea name="comment" required maxlength="500" rows="3"></textarea>
+<button class="btn">ส่งรีวิว</button>
+</form>
+{{else}}<p><a href="/login">เข้าสู่ระบบ</a> เพื่อเขียนรีวิว</p>{{end}}
+{{range .Data}}<div class="card">
+<div>{{stars .Rating}} <strong>{{.Username}}</strong> <span class="muted">{{.CreatedAt}}</span></div>
+<p>{{.Comment}}</p>
+{{if and $.User (or (eq .UserID $.User.ID) (eq $.User.Role "admin"))}}
+<form class="inline" method="post" action="/reviews/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm del">ลบ</button></form>{{end}}
+</div>{{else}}<p>ยังไม่มีรีวิว</p>{{end}}
+{{end}}

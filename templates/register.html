@@ -1,0 +1,11 @@
+{{define "title"}}สมัครสมาชิก{{end}}
+{{define "content"}}
+<h1>สมัครสมาชิก</h1>
+<form class="card" method="post" action="/register">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>ชื่อผู้ใช้ (a-z, 0-9, _)</label><input name="username" required minlength="3" maxlength="30" pattern="[A-Za-z0-9_]+">
+<label>อีเมล</label><input type="email" name="email" required maxlength="100">
+<label>รหัสผ่าน (อย่างน้อย 8 ตัว)</label><input type="password" name="password" required minlength="8" maxlength="72">
+<button class="btn">สมัครสมาชิก</button>
+</form>
+{{end}}

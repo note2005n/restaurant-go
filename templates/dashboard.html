@@ -1,0 +1,24 @@
+{{define "title"}}แดชบอร์ด{{end}}
+{{define "content"}}
+<h1>{{if eq .User.Role "admin"}}แดชบอร์ดผู้ดูแลระบบ{{else}}การจองของฉัน{{end}}</h1>
+{{if eq .User.Role "admin"}}
+<div class="grid">
+<div class="card">👤 ผู้ใช้<br><strong>{{.Data.Users}}</strong></div>
+<div class="card">📅 การจอง<br><strong>{{.Data.Resv}}</strong></div>
+<div class="card">⭐ รีวิว<br><strong>{{.Data.Revs}}</strong></div>
+<div class="card">🍽 เมนู<br><strong>{{.Data.Menu}}</strong></div>
+</div>
+{{end}}
+<a class="btn" href="/reservations/new">+ จองโต๊ะใหม่</a>
+<div class="card table"><table>
+<tr><th>วัน-เวลา</th><th>ชื่อ</th><th>เบอร์</th><th>คน</th>{{if eq .User.Role "admin"}}<th>ผู้จอง</th>{{end}}<th></th></tr>
+{{range .Data.Reservations}}<tr>
+<td>{{.When}}</td><td>{{.Name}}</td><td>{{.Phone}}</td><td>{{.PartySize}}</td>
+{{if eq $.User.Role "admin"}}<td>{{.Username}}</td>{{end}}
+<td>
+{{if eq .UserID $.User.ID}}<a class="btn sm sec" href="/reservations/{{.ID}}/edit">แก้ไข</a>{{end}}
+<form class="inline" method="post" action="/reservations/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm del">ลบ</button></form>
+</td></tr>
+{{else}}<tr><td colspan="6">ยังไม่มีการจอง</td></tr>{{end}}
+</table></div>
+{{end}}

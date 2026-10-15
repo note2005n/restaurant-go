@@ -1,0 +1,13 @@
+{{define "title"}}จองโต๊ะ{{end}}
+{{define "content"}}
+<h1>{{if .Data.Edit}}แก้ไขการจอง{{else}}จองโต๊ะ{{end}}</h1>
+<form class="card" method="post" action="{{.Data.Action}}">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>ชื่อผู้จอง</label><input name="name" required maxlength="80" value="{{.Data.R.Name}}">
+<label>เบอร์โทร</label><input name="phone" required value="{{.Data.R.Phone}}" inputmode="tel">
+<label>จำนวนคน</label><input type="number" name="party_size" min="1" max="20" required value="{{.Data.R.PartySize}}">
+<label>วัน-เวลา</label><input type="datetime-local" name="when" required value="{{dt .Data.R.When}}">
+<label>หมายเหตุ</label><textarea name="note" maxlength="300" rows="3">{{.Data.R.Note}}</textarea>
+<button class="btn">บันทึก</button> <a class="btn sec" href="/dashboard">ยกเลิก</a>
+</form>
+{{end}}

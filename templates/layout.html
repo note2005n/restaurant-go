@@ -1,0 +1,41 @@
+{{define "layout"}}<!doctype html>
+<html lang="th"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{template "title" .}} · ครัวบ้านเรา</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,"Noto Sans Thai",sans-serif;background:#fffaf3;color:#2b2118;line-height:1.55}
+header{background:#c2410c;color:#fff;padding:.7rem 1rem;display:flex;flex-wrap:wrap;gap:.5rem 1rem;align-items:center}
+header a,header button{color:#fff;text-decoration:none;background:none;border:0;font:inherit;cursor:pointer}
+header .brand{font-weight:700;font-size:1.2rem;margin-right:auto}
+nav{display:flex;flex-wrap:wrap;gap:.8rem;align-items:center}
+main{max-width:860px;margin:0 auto;padding:1rem}
+.card{background:#fff;border:1px solid #f0dcc8;border-radius:12px;padding:1rem;margin:.7rem 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.7rem}
+label{display:block;margin:.6rem 0 .2rem;font-weight:600}
+input,select,textarea{width:100%;padding:.6rem;border:1px solid #d6bfa5;border-radius:8px;font:inherit}
+.btn{display:inline-block;background:#c2410c;color:#fff;border:0;border-radius:8px;padding:.6rem 1.1rem;font:inherit;cursor:pointer;text-decoration:none;margin-top:.8rem}
+.btn.sec{background:#78716c}.btn.del{background:#b91c1c}.btn.sm{padding:.3rem .7rem;margin:0}
+.ok{background:#dcfce7;border:1px solid #86efac;padding:.6rem 1rem;border-radius:8px}
+.err{background:#fee2e2;border:1px solid #fca5a5;padding:.6rem 1rem;border-radius:8px}
+.table{overflow-x:auto}table{border-collapse:collapse;width:100%}th,td{padding:.5rem;border-bottom:1px solid #f0dcc8;text-align:left;white-space:nowrap}
+.price{color:#c2410c;font-weight:700}.muted{color:#78716c;font-size:.9rem}form.inline{display:inline}
+footer{text-align:center;color:#78716c;padding:1.5rem;font-size:.85rem}
+</style></head><body>
+<header>
+<a class="brand" href="/">🍜 ครัวบ้านเรา</a>
+<nav>
+<a href="/">เมนู</a><a href="/reviews">รีวิว</a>
+{{if .User}}
+<a href="/dashboard">แดชบอร์ด</a>
+{{if eq .User.Role "admin"}}<a href="/admin/menu">จัดการเมนู</a>{{end}}
+<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>ออกจากระบบ ({{.User.Username}})</button></form>
+{{else}}<a href="/login">เข้าสู่ระบบ</a><a href="/register">สมัครสมาชิก</a>{{end}}
+</nav></header>
+<main>
+{{if .Flash}}<div class="ok">ดำเนินการสำเร็จ</div>{{end}}
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+{{template "content" .}}
+</main>
+<footer>ระบบจองโต๊ะและรีวิวร้านอาหาร · เขียนด้วย Go</footer>
+</body></html>{{end}}

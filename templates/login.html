@@ -1,0 +1,10 @@
+{{define "title"}}เข้าสู่ระบบ{{end}}
+{{define "content"}}
+<h1>เข้าสู่ระบบ</h1>
+<form class="card" method="post" action="/login">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>ชื่อผู้ใช้</label><input name="username" required autocomplete="username">
+<label>รหัสผ่าน</label><input type="password" name="password" required autocomplete="current-password">
+<button class="btn">เข้าสู่ระบบ</button>
+</form>
+{{end}}

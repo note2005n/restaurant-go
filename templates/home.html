@@ -1,0 +1,9 @@
+{{define "title"}}เมนูอาหาร{{end}}
+{{define "content"}}
+<h1>เมนูอาหาร</h1>
+<a class="btn" href="/reservations/new">จองโต๊ะ</a>
+<div class="grid">
+{{range .Data}}<div class="card"><div class="muted">{{.Category}}</div><strong>{{.Name}}</strong><div>{{.Description}}</div><div class="price">{{printf "%.0f" .Price}} บาท</div></div>
+{{else}}<p>ยังไม่มีเมนู</p>{{end}}
+</div>
+{{end}}

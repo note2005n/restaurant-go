@@ -1,0 +1,721 @@
+package main
+
+import (
+	"crypto/rand"
+	"crypto/subtle"
+	"database/sql"
+	"embed"
+	"encoding/hex"
+	"html/template"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	_ "time/tzdata"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"golang.org/x/crypto/bcrypt"
+	_ "modernc.org/sqlite"
+)
+
+//go:embed templates/*.html
+var tplFS embed.FS
+
+var (
+	usernameRe   = regexp.MustCompile(`^[A-Za-z0-9_]{3,30}$`)
+	phoneRe      = regexp.MustCompile(`^[0-9+\- ]{8,15}$`)
+	ict          = time.FixedZone("ICT", 7*3600)
+	dummyHash, _ = bcrypt.GenerateFromPassword([]byte("dummy-password"), bcrypt.DefaultCost)
+)
+
+type User struct {
+	ID       int64
+	Username string
+	Role     string
+}
+
+type Page struct {
+	User  *User
+	CSRF  string
+	Flash bool
+	Error string
+	Data  any
+}
+
+type Reservation struct {
+	ID        int64
+	UserID    int64
+	Username  string
+	Name      string
+	Phone     string
+	PartySize int
+	When      string
+	Note      string
+}
+
+type MenuItem struct {
+	ID          int64
+	Name        string
+	Description string
+	Price       float64
+	Category    string
+}
+
+type Review struct {
+	ID        int64
+	UserID    int64
+	Username  string
+	Rating    int
+	Comment   string
+	CreatedAt string
+}
+
+// DB ห่อ *sql.DB เพื่อรองรับทั้ง SQLite (ในเครื่อง) และ PostgreSQL (บนโฮส)
+// โดยแปลง placeholder ? เป็น $1,$2,... อัตโนมัติเมื่อใช้ PostgreSQL
+type DB struct {
+	*sql.DB
+	pg bool
+}
+
+func (d *DB) rebind(q string) string {
+	if !d.pg {
+		return q
+	}
+	var b strings.Builder
+	n := 0
+	for _, c := range q {
+		if c == '?' {
+			n++
+			b.WriteString("$" + strconv.Itoa(n))
+		} else {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+func (d *DB) Exec(q string, a ...any) (sql.Result, error) { return d.DB.Exec(d.rebind(q), a...) }
+func (d *DB) Query(q string, a ...any) (*sql.Rows, error) { return d.DB.Query(d.rebind(q), a...) }
+func (d *DB) QueryRow(q string, a ...any) *sql.Row        { return d.DB.QueryRow(d.rebind(q), a...) }
+
+type App struct {
+	db    *DB
+	pages map[string]*template.Template
+	mu    sync.Mutex
+	fails map[string][]time.Time
+}
+
+const schemaSQLite = `
+CREATE TABLE IF NOT EXISTS users(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE NOT NULL,
+  email TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'customer',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS sessions(
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS menu_items(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  price REAL NOT NULL, category TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reservations(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, phone TEXT NOT NULL, party_size INTEGER NOT NULL,
+  when_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS reviews(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rating INTEGER NOT NULL, comment TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+`
+
+const pgNow = "(to_char(now() AT TIME ZONE 'Asia/Bangkok','YYYY-MM-DD HH24:MI'))"
+
+const schemaPG = `
+CREATE TABLE IF NOT EXISTS users(
+  id BIGSERIAL PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  email TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'customer',
+  created_at TEXT NOT NULL DEFAULT ` + pgNow + `);
+CREATE TABLE IF NOT EXISTS sessions(
+  token TEXT PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS menu_items(
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  price DOUBLE PRECISION NOT NULL, category TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reservations(
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, phone TEXT NOT NULL, party_size INTEGER NOT NULL,
+  when_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT ` + pgNow + `);
+CREATE TABLE IF NOT EXISTS reviews(
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rating INTEGER NOT NULL, comment TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT ` + pgNow + `);
+`
+
+func env(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+
+func token() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func main() {
+	var db *DB
+	schema := schemaSQLite
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		raw, err := sql.Open("pgx", url)
+		if err != nil {
+			log.Fatal(err)
+		}
+		raw.SetMaxOpenConns(10)
+		db = &DB{DB: raw, pg: true}
+		schema = schemaPG
+		log.Println("ใช้ฐานข้อมูล PostgreSQL")
+	} else {
+		raw, err := sql.Open("sqlite", env("DB_PATH", "restaurant.db")+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+		if err != nil {
+			log.Fatal(err)
+		}
+		raw.SetMaxOpenConns(1)
+		db = &DB{DB: raw}
+		log.Println("ใช้ฐานข้อมูล SQLite (ไฟล์)")
+	}
+	app := &App{db: db, fails: map[string][]time.Time{}, pages: map[string]*template.Template{}}
+	for _, stmt := range strings.Split(schema, ");") {
+		if strings.TrimSpace(stmt) == "" {
+			continue
+		}
+		if _, err := db.Exec(stmt + ")"); err != nil {
+			log.Fatal("migrate: ", err)
+		}
+	}
+	app.seed()
+	funcs := template.FuncMap{
+		"dt":    func(s string) string { return strings.Replace(s, " ", "T", 1) },
+		"stars": func(n int) string { return strings.Repeat("★", n) + strings.Repeat("☆", 5-n) },
+	}
+	for _, n := range []string{"home", "login", "register", "dashboard", "reservation_form", "reviews", "admin_menu"} {
+		app.pages[n] = template.Must(template.New("").Funcs(funcs).ParseFS(tplFS, "templates/layout.html", "templates/"+n+".html"))
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", app.home)
+	mux.HandleFunc("GET /register", app.registerForm)
+	mux.HandleFunc("POST /register", app.register)
+	mux.HandleFunc("GET /login", app.loginForm)
+	mux.HandleFunc("POST /login", app.login)
+	mux.HandleFunc("POST /logout", app.logout)
+	mux.HandleFunc("GET /dashboard", app.auth(app.dashboard))
+	mux.HandleFunc("GET /reservations/new", app.auth(app.resNew))
+	mux.HandleFunc("POST /reservations", app.auth(app.resCreate))
+	mux.HandleFunc("GET /reservations/{id}/edit", app.auth(app.resEdit))
+	mux.HandleFunc("POST /reservations/{id}/edit", app.auth(app.resUpdate))
+	mux.HandleFunc("POST /reservations/{id}/delete", app.auth(app.resDelete))
+	mux.HandleFunc("GET /reviews", app.reviews)
+	mux.HandleFunc("POST /reviews", app.auth(app.reviewCreate))
+	mux.HandleFunc("POST /reviews/{id}/delete", app.auth(app.reviewDelete))
+	mux.HandleFunc("GET /admin/menu", app.admin(app.menuList))
+	mux.HandleFunc("POST /admin/menu", app.admin(app.menuCreate))
+	mux.HandleFunc("POST /admin/menu/{id}/delete", app.admin(app.menuDelete))
+
+	srv := &http.Server{
+		Addr: ":" + env("PORT", "8080"), Handler: app.secure(mux),
+		ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
+	}
+	log.Println("listening on", srv.Addr)
+	log.Fatal(srv.ListenAndServe())
+}
+
+func (a *App) seed() {
+	var n int
+	a.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin'`).Scan(&n)
+	if n == 0 {
+		u, p := env("ADMIN_USER", "admin"), env("ADMIN_PASS", "ChangeMe123!")
+		h, _ := bcrypt.GenerateFromPassword([]byte(p), bcrypt.DefaultCost)
+		a.db.Exec(`INSERT INTO users(username,email,password_hash,role) VALUES(?,?,?,'admin')`, u, "admin@example.com", string(h))
+		log.Println("สร้างผู้ดูแลระบบ:", u, "(เปลี่ยนรหัสผ่านผ่าน ADMIN_PASS ก่อนใช้งานจริง)")
+	}
+	a.db.QueryRow(`SELECT COUNT(*) FROM menu_items`).Scan(&n)
+	if n == 0 {
+		for _, m := range []MenuItem{
+			{Name: "ผัดกะเพราหมูสับไข่ดาว", Description: "เผ็ดร้อนหอมใบกะเพรา", Price: 70, Category: "จานเดียว"},
+			{Name: "ต้มยำกุ้งน้ำข้น", Description: "กุ้งแม่น้ำตัวโต เปรี้ยวเผ็ดกลมกล่อม", Price: 220, Category: "ต้ม/แกง"},
+			{Name: "ส้มตำไทย", Description: "รสจัดจ้าน", Price: 60, Category: "ยำ/ตำ"},
+			{Name: "ชาไทยเย็น", Description: "หอมมัน หวานน้อยได้", Price: 45, Category: "เครื่องดื่ม"},
+		} {
+			a.db.Exec(`INSERT INTO menu_items(name,description,price,category) VALUES(?,?,?,?)`, m.Name, m.Description, m.Price, m.Category)
+		}
+	}
+}
+
+// ---------- ความปลอดภัย ----------
+
+func (a *App) secure(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "same-origin")
+		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if r.Method == http.MethodPost {
+			c, err := r.Cookie("csrf")
+			if err != nil || r.ParseForm() != nil ||
+				subtle.ConstantTimeCompare([]byte(c.Value), []byte(r.PostFormValue("csrf"))) != 1 {
+				http.Error(w, "CSRF token ไม่ถูกต้อง", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func secureCookie() bool { return os.Getenv("COOKIE_SECURE") == "1" }
+
+func (a *App) csrfToken(w http.ResponseWriter, r *http.Request) string {
+	if c, err := r.Cookie("csrf"); err == nil && len(c.Value) == 64 {
+		return c.Value
+	}
+	t := token()
+	http.SetCookie(w, &http.Cookie{Name: "csrf", Value: t, Path: "/", HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, Secure: secureCookie()})
+	return t
+}
+
+func (a *App) currentUser(r *http.Request) *User {
+	c, err := r.Cookie("sid")
+	if err != nil {
+		return nil
+	}
+	u := &User{}
+	err = a.db.QueryRow(`SELECT u.id,u.username,u.role FROM sessions s JOIN users u ON u.id=s.user_id
+		WHERE s.token=? AND s.expires_at>?`, c.Value, time.Now().Unix()).Scan(&u.ID, &u.Username, &u.Role)
+	if err != nil {
+		return nil
+	}
+	return u
+}
+
+func (a *App) auth(h func(http.ResponseWriter, *http.Request, *User)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u := a.currentUser(r)
+		if u == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		h(w, r, u)
+	}
+}
+
+func (a *App) admin(h func(http.ResponseWriter, *http.Request, *User)) http.HandlerFunc {
+	return a.auth(func(w http.ResponseWriter, r *http.Request, u *User) {
+		if u.Role != "admin" {
+			http.Error(w, "เฉพาะผู้ดูแลระบบ", http.StatusForbidden)
+			return
+		}
+		h(w, r, u)
+	})
+}
+
+func clientIP(r *http.Request) string {
+	h, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return h
+}
+
+// จำกัดล็อกอินผิดไม่เกิน 5 ครั้งใน 10 นาที ต่อ IP
+func (a *App) tooMany(ip string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var keep []time.Time
+	for _, t := range a.fails[ip] {
+		if time.Since(t) < 10*time.Minute {
+			keep = append(keep, t)
+		}
+	}
+	a.fails[ip] = keep
+	return len(keep) >= 5
+}
+
+func (a *App) addFail(ip string) {
+	a.mu.Lock()
+	a.fails[ip] = append(a.fails[ip], time.Now())
+	a.mu.Unlock()
+}
+
+// ---------- ตัวช่วยแสดงผล ----------
+
+func (a *App) page(w http.ResponseWriter, r *http.Request) Page {
+	return Page{User: a.currentUser(r), CSRF: a.csrfToken(w, r), Flash: r.URL.Query().Get("ok") == "1"}
+}
+
+func (a *App) render(w http.ResponseWriter, name string, p Page, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	if err := a.pages[name].ExecuteTemplate(w, "layout", p); err != nil {
+		log.Println("template:", err)
+	}
+}
+
+func (a *App) serverErr(w http.ResponseWriter, err error) {
+	log.Println("error:", err)
+	http.Error(w, "เกิดข้อผิดพลาดภายในระบบ", http.StatusInternalServerError)
+}
+
+// ---------- หน้าแรก / เมนู ----------
+
+func (a *App) menuItems() []MenuItem {
+	rows, err := a.db.Query(`SELECT id,name,description,price,category FROM menu_items ORDER BY category,name`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []MenuItem
+	for rows.Next() {
+		var m MenuItem
+		rows.Scan(&m.ID, &m.Name, &m.Description, &m.Price, &m.Category)
+		out = append(out, m)
+	}
+	return out
+}
+
+func (a *App) home(w http.ResponseWriter, r *http.Request) {
+	p := a.page(w, r)
+	p.Data = a.menuItems()
+	a.render(w, "home", p, 200)
+}
+
+// ---------- สมัคร / เข้าสู่ระบบ ----------
+
+func (a *App) registerForm(w http.ResponseWriter, r *http.Request) {
+	a.render(w, "register", a.page(w, r), 200)
+}
+
+func (a *App) register(w http.ResponseWriter, r *http.Request) {
+	p := a.page(w, r)
+	username := strings.TrimSpace(r.PostFormValue("username"))
+	email := strings.TrimSpace(r.PostFormValue("email"))
+	pw := r.PostFormValue("password")
+	switch {
+	case !usernameRe.MatchString(username):
+		p.Error = "ชื่อผู้ใช้ต้องเป็น a-z, 0-9, _ ยาว 3-30 ตัว"
+	case !strings.Contains(email, "@") || len(email) > 100:
+		p.Error = "อีเมลไม่ถูกต้อง"
+	case len(pw) < 8 || len(pw) > 72:
+		p.Error = "รหัสผ่านต้องยาว 8-72 ตัวอักษร"
+	}
+	if p.Error != "" {
+		a.render(w, "register", p, 400)
+		return
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	if err != nil {
+		a.serverErr(w, err)
+		return
+	}
+	if _, err := a.db.Exec(`INSERT INTO users(username,email,password_hash) VALUES(?,?,?)`, username, email, string(h)); err != nil {
+		p.Error = "ชื่อผู้ใช้นี้ถูกใช้แล้ว"
+		a.render(w, "register", p, 409)
+		return
+	}
+	http.Redirect(w, r, "/login?ok=1", http.StatusSeeOther)
+}
+
+func (a *App) loginForm(w http.ResponseWriter, r *http.Request) {
+	a.render(w, "login", a.page(w, r), 200)
+}
+
+func (a *App) login(w http.ResponseWriter, r *http.Request) {
+	p := a.page(w, r)
+	ip := clientIP(r)
+	if a.tooMany(ip) {
+		p.Error = "ลองผิดหลายครั้งเกินไป กรุณารอ 10 นาที"
+		a.render(w, "login", p, 429)
+		return
+	}
+	var id int64
+	var hash string
+	err := a.db.QueryRow(`SELECT id,password_hash FROM users WHERE username=?`, strings.TrimSpace(r.PostFormValue("username"))).Scan(&id, &hash)
+	if err != nil {
+		hash = string(dummyHash) // กัน timing attack
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(r.PostFormValue("password"))) != nil || err != nil {
+		a.addFail(ip)
+		p.Error = "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"
+		a.render(w, "login", p, 401)
+		return
+	}
+	t := token()
+	exp := time.Now().Add(24 * time.Hour)
+	if _, err := a.db.Exec(`INSERT INTO sessions(token,user_id,expires_at) VALUES(?,?,?)`, t, id, exp.Unix()); err != nil {
+		a.serverErr(w, err)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: t, Path: "/", Expires: exp, HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, Secure: secureCookie()})
+	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+}
+
+func (a *App) logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("sid"); err == nil {
+		a.db.Exec(`DELETE FROM sessions WHERE token=?`, c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// ---------- แดชบอร์ด ----------
+
+func (a *App) listRes(userID int64) []Reservation {
+	q := `SELECT r.id,r.user_id,u.username,r.name,r.phone,r.party_size,r.when_at,r.note
+		FROM reservations r JOIN users u ON u.id=r.user_id`
+	args := []any{}
+	if userID != 0 {
+		q += ` WHERE r.user_id=?`
+		args = append(args, userID)
+	}
+	rows, err := a.db.Query(q+` ORDER BY r.when_at`, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []Reservation
+	for rows.Next() {
+		var x Reservation
+		rows.Scan(&x.ID, &x.UserID, &x.Username, &x.Name, &x.Phone, &x.PartySize, &x.When, &x.Note)
+		out = append(out, x)
+	}
+	return out
+}
+
+func (a *App) dashboard(w http.ResponseWriter, r *http.Request, u *User) {
+	p := a.page(w, r)
+	d := struct {
+		Reservations            []Reservation
+		Users, Resv, Revs, Menu int
+	}{}
+	if u.Role == "admin" {
+		d.Reservations = a.listRes(0)
+		a.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&d.Users)
+		a.db.QueryRow(`SELECT COUNT(*) FROM reservations`).Scan(&d.Resv)
+		a.db.QueryRow(`SELECT COUNT(*) FROM reviews`).Scan(&d.Revs)
+		a.db.QueryRow(`SELECT COUNT(*) FROM menu_items`).Scan(&d.Menu)
+	} else {
+		d.Reservations = a.listRes(u.ID)
+	}
+	p.Data = d
+	a.render(w, "dashboard", p, 200)
+}
+
+// ---------- CRUD การจองโต๊ะ (มีเจ้าของข้อมูล) ----------
+
+type resForm struct {
+	Action string
+	R      Reservation
+	Edit   bool
+}
+
+func (a *App) getRes(id int64) (Reservation, error) {
+	var x Reservation
+	err := a.db.QueryRow(`SELECT id,user_id,name,phone,party_size,when_at,note FROM reservations WHERE id=?`, id).
+		Scan(&x.ID, &x.UserID, &x.Name, &x.Phone, &x.PartySize, &x.When, &x.Note)
+	return x, err
+}
+
+func parseRes(r *http.Request) (Reservation, string) {
+	x := Reservation{
+		Name:  strings.TrimSpace(r.PostFormValue("name")),
+		Phone: strings.TrimSpace(r.PostFormValue("phone")),
+		Note:  strings.TrimSpace(r.PostFormValue("note")),
+		When:  strings.Replace(strings.TrimSpace(r.PostFormValue("when")), "T", " ", 1),
+	}
+	x.PartySize, _ = strconv.Atoi(r.PostFormValue("party_size"))
+	t, err := time.ParseInLocation("2006-01-02 15:04", x.When, ict)
+	switch {
+	case x.Name == "" || len(x.Name) > 80:
+		return x, "กรุณากรอกชื่อ (ไม่เกิน 80 ตัวอักษร)"
+	case !phoneRe.MatchString(x.Phone):
+		return x, "เบอร์โทรไม่ถูกต้อง"
+	case x.PartySize < 1 || x.PartySize > 20:
+		return x, "จำนวนคนต้อง 1-20"
+	case err != nil || t.Before(time.Now()):
+		return x, "กรุณาเลือกวัน-เวลาในอนาคต"
+	case len(x.Note) > 300:
+		return x, "หมายเหตุยาวเกิน 300 ตัวอักษร"
+	}
+	return x, ""
+}
+
+func (a *App) resNew(w http.ResponseWriter, r *http.Request, u *User) {
+	p := a.page(w, r)
+	p.Data = resForm{Action: "/reservations", R: Reservation{PartySize: 2}}
+	a.render(w, "reservation_form", p, 200)
+}
+
+func (a *App) resCreate(w http.ResponseWriter, r *http.Request, u *User) {
+	x, msg := parseRes(r)
+	if msg != "" {
+		p := a.page(w, r)
+		p.Error, p.Data = msg, resForm{Action: "/reservations", R: x}
+		a.render(w, "reservation_form", p, 400)
+		return
+	}
+	if _, err := a.db.Exec(`INSERT INTO reservations(user_id,name,phone,party_size,when_at,note) VALUES(?,?,?,?,?,?)`,
+		u.ID, x.Name, x.Phone, x.PartySize, x.When, x.Note); err != nil {
+		a.serverErr(w, err)
+		return
+	}
+	http.Redirect(w, r, "/dashboard?ok=1", http.StatusSeeOther)
+}
+
+// โหลดการจองและตรวจสิทธิ์ความเป็นเจ้าของ (ผู้ใช้ A แก้/ลบของ B ไม่ได้)
+func (a *App) ownedRes(w http.ResponseWriter, r *http.Request, u *User, adminOK bool) (Reservation, bool) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	x, err := a.getRes(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return x, false
+	}
+	if x.UserID != u.ID && !(adminOK && u.Role == "admin") {
+		http.Error(w, "ไม่มีสิทธิ์จัดการข้อมูลนี้", http.StatusForbidden)
+		return x, false
+	}
+	return x, true
+}
+
+func (a *App) resEdit(w http.ResponseWriter, r *http.Request, u *User) {
+	x, ok := a.ownedRes(w, r, u, false)
+	if !ok {
+		return
+	}
+	p := a.page(w, r)
+	p.Data = resForm{Action: "/reservations/" + strconv.FormatInt(x.ID, 10) + "/edit", R: x, Edit: true}
+	a.render(w, "reservation_form", p, 200)
+}
+
+func (a *App) resUpdate(w http.ResponseWriter, r *http.Request, u *User) {
+	old, ok := a.ownedRes(w, r, u, false)
+	if !ok {
+		return
+	}
+	x, msg := parseRes(r)
+	if msg != "" {
+		p := a.page(w, r)
+		x.ID = old.ID
+		p.Error, p.Data = msg, resForm{Action: "/reservations/" + strconv.FormatInt(old.ID, 10) + "/edit", R: x, Edit: true}
+		a.render(w, "reservation_form", p, 400)
+		return
+	}
+	a.db.Exec(`UPDATE reservations SET name=?,phone=?,party_size=?,when_at=?,note=? WHERE id=? AND user_id=?`,
+		x.Name, x.Phone, x.PartySize, x.When, x.Note, old.ID, old.UserID)
+	http.Redirect(w, r, "/dashboard?ok=1", http.StatusSeeOther)
+}
+
+func (a *App) resDelete(w http.ResponseWriter, r *http.Request, u *User) {
+	x, ok := a.ownedRes(w, r, u, true) // แอดมินลบได้
+	if !ok {
+		return
+	}
+	a.db.Exec(`DELETE FROM reservations WHERE id=?`, x.ID)
+	http.Redirect(w, r, "/dashboard?ok=1", http.StatusSeeOther)
+}
+
+// ---------- รีวิว ----------
+
+func (a *App) reviews(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.db.Query(`SELECT v.id,v.user_id,u.username,v.rating,v.comment,v.created_at
+		FROM reviews v JOIN users u ON u.id=v.user_id ORDER BY v.id DESC LIMIT 100`)
+	if err != nil {
+		a.serverErr(w, err)
+		return
+	}
+	defer rows.Close()
+	var list []Review
+	for rows.Next() {
+		var v Review
+		rows.Scan(&v.ID, &v.UserID, &v.Username, &v.Rating, &v.Comment, &v.CreatedAt)
+		list = append(list, v)
+	}
+	p := a.page(w, r)
+	p.Data = list
+	a.render(w, "reviews", p, 200)
+}
+
+func (a *App) reviewCreate(w http.ResponseWriter, r *http.Request, u *User) {
+	rating, _ := strconv.Atoi(r.PostFormValue("rating"))
+	comment := strings.TrimSpace(r.PostFormValue("comment"))
+	if rating < 1 || rating > 5 || comment == "" || len([]rune(comment)) > 500 {
+		http.Error(w, "ข้อมูลรีวิวไม่ถูกต้อง", http.StatusBadRequest)
+		return
+	}
+	a.db.Exec(`INSERT INTO reviews(user_id,rating,comment) VALUES(?,?,?)`, u.ID, rating, comment)
+	http.Redirect(w, r, "/reviews?ok=1", http.StatusSeeOther)
+}
+
+func (a *App) reviewDelete(w http.ResponseWriter, r *http.Request, u *User) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var owner int64
+	if a.db.QueryRow(`SELECT user_id FROM reviews WHERE id=?`, id).Scan(&owner) != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if owner != u.ID && u.Role != "admin" {
+		http.Error(w, "ไม่มีสิทธิ์ลบรีวิวนี้", http.StatusForbidden)
+		return
+	}
+	a.db.Exec(`DELETE FROM reviews WHERE id=?`, id)
+	http.Redirect(w, r, "/reviews?ok=1", http.StatusSeeOther)
+}
+
+// ---------- แอดมิน: จัดการเมนู ----------
+
+func (a *App) menuList(w http.ResponseWriter, r *http.Request, u *User) {
+	p := a.page(w, r)
+	p.Data = a.menuItems()
+	a.render(w, "admin_menu", p, 200)
+}
+
+func (a *App) menuCreate(w http.ResponseWriter, r *http.Request, u *User) {
+	name := strings.TrimSpace(r.PostFormValue("name"))
+	cat := strings.TrimSpace(r.PostFormValue("category"))
+	desc := strings.TrimSpace(r.PostFormValue("description"))
+	price, err := strconv.ParseFloat(r.PostFormValue("price"), 64)
+	if name == "" || cat == "" || len(name) > 100 || len(desc) > 300 || err != nil || price < 0 || price > 100000 {
+		http.Error(w, "ข้อมูลเมนูไม่ถูกต้อง", http.StatusBadRequest)
+		return
+	}
+	a.db.Exec(`INSERT INTO menu_items(name,description,price,category) VALUES(?,?,?,?)`, name, desc, price, cat)
+	http.Redirect(w, r, "/admin/menu?ok=1", http.StatusSeeOther)
+}
+
+func (a *App) menuDelete(w http.ResponseWriter, r *http.Request, u *User) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	a.db.Exec(`DELETE FROM menu_items WHERE id=?`, id)
+	http.Redirect(w, r, "/admin/menu?ok=1", http.StatusSeeOther)
+}

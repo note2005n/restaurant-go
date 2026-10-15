@@ -1,0 +1,16 @@
+{{define "title"}}จัดการเมนู{{end}}
+{{define "content"}}
+<h1>จัดการเมนู (แอดมิน)</h1>
+<form class="card" method="post" action="/admin/menu">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>ชื่อเมนู</label><input name="name" required maxlength="100">
+<label>หมวดหมู่</label><input name="category" required maxlength="50">
+<label>รายละเอียด</label><input name="description" maxlength="300">
+<label>ราคา (บาท)</label><input type="number" step="1" min="0" name="price" required>
+<button class="btn">เพิ่มเมนู</button>
+</form>
+<div class="card table"><table><tr><th>เมนู</th><th>หมวด</th><th>ราคา</th><th></th></tr>
+{{range .Data}}<tr><td>{{.Name}}</td><td>{{.Category}}</td><td>{{printf "%.0f" .Price}}</td>
+<td><form class="inline" method="post" action="/admin/menu/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm del">ลบ</button></form></td></tr>{{end}}
+</table></div>
+{{end}}
