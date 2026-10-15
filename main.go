@@ -335,6 +335,15 @@ func (a *App) seed() {
 			{Name: "ต้มยำกุ้งน้ำข้น", Description: "กุ้งแม่น้ำตัวโต เปรี้ยวเผ็ดกลมกล่อม", Price: 220, Category: "ต้ม/แกง", ImageURL: "/static/ต้มยำกุ้งน้ำข้น.jpg"},
 			{Name: "ส้มตำไทย", Description: "รสจัดจ้าน", Price: 60, Category: "ยำ/ตำ", ImageURL: "/static/ส้มตำไทย.jpg"},
 			{Name: "ชาไทยเย็น", Description: "หอมมัน หวานน้อยได้", Price: 45, Category: "เครื่องดื่ม", ImageURL: "/static/images.jpg"},
+			{Name: "ชาเขียวเย็น", Description: "ชาเขียวหอมเข้มข้น รสชาตินุ่มละมุน หวานมันกำลังดี ดื่มแล้วสดชื่นกระปรี้กระเปร่า", Price: 45, Category: "เครื่องดื่ม", ImageURL: "/static/ชาเขียว.jpg"},
+			{Name: "ข้าวผัดหมู", Description: "ข้าวผัดหมูแสนอร่อย", Price: 45, Category: "จานเดียว", ImageURL: "/static/ข้าวผัดหมู.jpg"},
+			{Name: "ข้าวไข่ข้นกุ้ง", Description: "ไข่ข้นนุ่มละมุนลิ้น รสชาติกลมกล่อม ท็อปด้วยกุ้งสดเนื้อเด้งสุกกำลังดี", Price: 45, Category: "จานเดียว", ImageURL: "/static/ไข่ข้นกุ้ง.jpg"},
+			{Name: "ข้าวไข่ข้นหมูสับ", Description: "ไข่ข้นเนื้อนุ่มละมุน และหมูสับผัดกลมกล่อม หอมอร่อยเข้ากันได้อย่างลงตัว", Price: 45, Category: "จานเดียว", ImageURL: "/static/ไข่ข้นหมูสับ.jpg"},
+			{Name: "ต้มแซ่บกระดูกหมู", Description: "ต้มแซ่บรสจัดจ้าน เปรี้ยว เผ็ด เค็มกลมกล่อม หอมกลิ่นสมุนไพร เคี่ยวพร้อมกระดูกหมูเนื้อนุ่มเปื่อยกำลังดี", Price: 45, Category: "ต้ม/แกง", ImageURL: "/static/ต้มแซ่บกระดูกหมู.jpg"},
+			{Name: "ตำทะเล", Description: "ส้มตำรสเด็ดจัดจ้าน คลุกเคล้าวัตถุดิบทะเลสดใหม่ ทั้งกุ้ง ปลาหมึก เนื้อเด้ง รสชาติเปรี้ยว เผ็ด แซ่บถึงใจ
+			", Price: 45, Category: "ยำ/ตำ", ImageURL: "/static/ตำทะเล.jpg"},
+			{Name: "ตำป่า", Description: "ส้มตำปลาร้าเข้มข้นรสจัดจ้าน เครื่องแน่นจัดเต็ม แซ่บนัวถึงใจ", Price: 45, Category: "ยำ/ตำ", ImageURL: "/static/ตำป่า.jpg"},
+			{Name: "ยำวุ้นเส้นหมูยอ", Description: "วุ้นเส้นเหนียวนุ่ม ยำคลุกเคล้ากับหมูยออย่างดี น้ำยำรสชาติจัดจ้าน", Price: 45, Category: "ยำ/ตำ", ImageURL: "/static/ยำวุ้นเส้นหมูยอ.jpg"},
 		} {
 			a.db.Exec(`INSERT INTO menu_items(name,description,price,category,image_url) VALUES(?,?,?,?,?)`, m.Name, m.Description, m.Price, m.Category, m.ImageURL)
 		}
