@@ -255,12 +255,33 @@ func main() {
 	} {
 		db.Exec(`UPDATE menu_items SET image_url=? WHERE name=? AND image_url=''`, img, name)
 	}
+	// คอลัมน์เพิ่มของตาราง orders: ประเภทการสั่ง / การจองที่ผูกไว้ / หมายเหตุ
+	ifNot := ""
+	if db.pg {
+		ifNot = "IF NOT EXISTS "
+	}
+	for _, q := range []string{
+		"ALTER TABLE orders ADD COLUMN " + ifNot + "order_type TEXT NOT NULL DEFAULT 'normal'",
+		"ALTER TABLE orders ADD COLUMN " + ifNot + "reservation_id " + map[bool]string{true: "BIGINT", false: "INTEGER"}[db.pg] + " REFERENCES reservations(id) ON DELETE SET NULL",
+		"ALTER TABLE orders ADD COLUMN " + ifNot + "note TEXT NOT NULL DEFAULT ''",
+	} {
+		db.Exec(q) // ถ้ามีคอลัมน์อยู่แล้วจะ error ซึ่งไม่เป็นไร
+	}
 	app.seed()
 	funcs := template.FuncMap{
 		"dt":    func(s string) string { return strings.Replace(s, " ", "T", 1) },
 		"stars": func(n int) string { return strings.Repeat("★", n) + strings.Repeat("☆", 5-n) },
+		"statusTH": func(x string) string {
+			return map[string]string{"pending": "รอดำเนินการ", "preparing": "กำลังทำ", "done": "เสร็จแล้ว", "cancelled": "ยกเลิก"}[x]
+		},
+		"typeTH": func(x string) string {
+			if x == "reservation" {
+				return "สั่งล่วงหน้าพร้อมจองโต๊ะ"
+			}
+			return "สั่งอาหารปกติ"
+		},
 	}
-	for _, n := range []string{"home", "login", "register", "dashboard", "reservation_form", "reviews", "admin_menu"} {
+	for _, n := range []string{"home", "login", "register", "dashboard", "reservation_form", "reviews", "admin_menu", "order_form", "orders"} {
 		app.pages[n] = template.Must(template.New("").Funcs(funcs).ParseFS(tplFS, "templates/layout.html", "templates/"+n+".html"))
 	}
 
@@ -281,7 +302,11 @@ func main() {
 	mux.HandleFunc("GET /reviews", app.reviews)
 	mux.HandleFunc("POST /reviews", app.auth(app.reviewCreate))
 	mux.HandleFunc("POST /reviews/{id}/delete", app.auth(app.reviewDelete))
+	mux.HandleFunc("GET /order", app.auth(app.orderForm))
 	mux.HandleFunc("POST /orders", app.auth(app.orderCreate))
+	mux.HandleFunc("GET /my-orders", app.auth(app.orderHistory))
+	mux.HandleFunc("POST /orders/{id}/cancel", app.auth(app.orderCancel))
+	mux.HandleFunc("POST /admin/orders/{id}/status", app.admin(app.orderStatus))
 	mux.HandleFunc("GET /admin/menu", app.admin(app.menuList))
 	mux.HandleFunc("POST /admin/menu", app.admin(app.menuCreate))
 	mux.HandleFunc("POST /admin/menu/{id}/delete", app.admin(app.menuDelete))
@@ -459,36 +484,202 @@ func (a *App) home(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "home", p, 200)
 }
 
-// ---------- ฟังก์ชันสั่งอาหาร ----------
+// ---------- สั่งอาหาร ----------
+
+type OrderItemView struct {
+	Name  string
+	Qty   int
+	Price float64
+}
+
+type OrderView struct {
+	ID                                         int64
+	Username, Type, ResWhen, Status, CreatedAt string
+	Note                                       string
+	Total                                      float64
+	Items                                      []OrderItemView
+}
+
+type orderFormData struct {
+	Menu         []MenuItem
+	Reservations []Reservation
+	Selected     int64
+	Type         string
+	NewRes       bool
+}
+
+func (a *App) renderOrderForm(w http.ResponseWriter, r *http.Request, u *User, msg string, status int) {
+	p := a.page(w, r)
+	p.Error = msg
+	sel, _ := strconv.ParseInt(r.FormValue("reservation_id"), 10, 64)
+	if sel == 0 {
+		sel, _ = strconv.ParseInt(r.FormValue("reservation"), 10, 64)
+	}
+	d := orderFormData{Menu: a.menuItems(), Selected: sel, NewRes: r.FormValue("new") == "1"}
+	now := time.Now().In(ict).Format("2006-01-02 15:04")
+	for _, x := range a.listRes(u.ID) {
+		if x.When >= now || x.ID == sel {
+			d.Reservations = append(d.Reservations, x)
+		}
+	}
+	if sel != 0 || r.FormValue("order_type") == "reservation" {
+		d.Type = "reservation"
+	}
+	p.Data = d
+	a.render(w, "order_form", p, status)
+}
+
+func (a *App) orderForm(w http.ResponseWriter, r *http.Request, u *User) {
+	a.renderOrderForm(w, r, u, "", http.StatusOK)
+}
 
 func (a *App) orderCreate(w http.ResponseWriter, r *http.Request, u *User) {
-	menuID, _ := strconv.ParseInt(r.PostFormValue("menu_id"), 10, 64)
-	qty, _ := strconv.Atoi(r.PostFormValue("quantity"))
-	if qty < 1 {
-		qty = 1
-	}
-	if qty > 50 {
-		qty = 50
+	prices := map[int64]float64{}
+	menu := a.menuItems()
+	for _, m := range menu {
+		prices[m.ID] = m.Price
 	}
 
-	var price float64
-	if err := a.db.QueryRow(`SELECT price FROM menu_items WHERE id=?`, menuID).Scan(&price); err != nil {
-		http.Error(w, "ไม่พบเมนูนี้", http.StatusBadRequest)
+	items := map[int64]int{}
+	if mid := r.PostFormValue("menu_id"); mid != "" { // สั่งด่วนจากหน้าแรก (1 รายการ)
+		id, _ := strconv.ParseInt(mid, 10, 64)
+		q, _ := strconv.Atoi(r.PostFormValue("quantity"))
+		if _, ok := prices[id]; !ok {
+			http.Error(w, "ไม่พบเมนูนี้", http.StatusBadRequest)
+			return
+		}
+		if q < 1 {
+			q = 1
+		}
+		items[id] = q
+	} else { // ฟอร์มสั่งหลายรายการ: qty_<id>
+		for _, m := range menu {
+			q, _ := strconv.Atoi(r.PostFormValue("qty_" + strconv.FormatInt(m.ID, 10)))
+			if q > 0 {
+				items[m.ID] = q
+			}
+		}
+	}
+	if len(items) == 0 {
+		a.renderOrderForm(w, r, u, "กรุณาเลือกอาหารอย่างน้อย 1 รายการ", http.StatusBadRequest)
+		return
+	}
+	var total float64
+	for id, q := range items {
+		if q > 50 {
+			a.renderOrderForm(w, r, u, "จำนวนต่อรายการต้องไม่เกิน 50", http.StatusBadRequest)
+			return
+		}
+		total += prices[id] * float64(q) // ราคาจากฐานข้อมูลเท่านั้น ไม่เชื่อค่าจากฟอร์ม
+	}
+
+	orderType := "normal"
+	var resID sql.NullInt64
+	if r.PostFormValue("order_type") == "reservation" {
+		id, _ := strconv.ParseInt(r.PostFormValue("reservation_id"), 10, 64)
+		res, err := a.getRes(id)
+		if err != nil || res.UserID != u.ID { // ผูกได้เฉพาะการจองของตัวเอง
+			a.renderOrderForm(w, r, u, "กรุณาเลือกการจองของคุณ", http.StatusBadRequest)
+			return
+		}
+		orderType = "reservation"
+		resID = sql.NullInt64{Int64: id, Valid: true}
+	}
+	note := strings.TrimSpace(r.PostFormValue("note"))
+	if len([]rune(note)) > 200 {
+		a.renderOrderForm(w, r, u, "หมายเหตุยาวเกิน 200 ตัวอักษร", http.StatusBadRequest)
 		return
 	}
 
 	var orderID int64
-	if err := a.db.QueryRow(`INSERT INTO orders(user_id, total_price) VALUES(?, ?) RETURNING id`,
-		u.ID, price*float64(qty)).Scan(&orderID); err != nil {
+	if err := a.db.QueryRow(`INSERT INTO orders(user_id,total_price,order_type,reservation_id,note) VALUES(?,?,?,?,?) RETURNING id`,
+		u.ID, total, orderType, resID, note).Scan(&orderID); err != nil {
 		a.serverErr(w, err)
 		return
 	}
-	if _, err := a.db.Exec(`INSERT INTO order_items(order_id, menu_item_id, quantity, price) VALUES(?, ?, ?, ?)`,
-		orderID, menuID, qty, price); err != nil {
+	for id, q := range items {
+		if _, err := a.db.Exec(`INSERT INTO order_items(order_id,menu_item_id,quantity,price) VALUES(?,?,?,?)`,
+			orderID, id, q, prices[id]); err != nil {
+			a.db.Exec(`DELETE FROM orders WHERE id=?`, orderID)
+			a.serverErr(w, err)
+			return
+		}
+	}
+	http.Redirect(w, r, "/my-orders?ok=1", http.StatusSeeOther)
+}
+
+func (a *App) listOrders(userID int64) []OrderView {
+	q := `SELECT o.id,u.username,o.order_type,COALESCE(r.when_at,''),o.total_price,o.status,o.created_at,o.note
+		FROM orders o JOIN users u ON u.id=o.user_id LEFT JOIN reservations r ON r.id=o.reservation_id`
+	args := []any{}
+	if userID != 0 {
+		q += ` WHERE o.user_id=?`
+		args = append(args, userID)
+	}
+	rows, err := a.db.Query(q+` ORDER BY o.id DESC LIMIT 50`, args...)
+	if err != nil {
+		log.Println("listOrders:", err)
+		return nil
+	}
+	var out []OrderView
+	for rows.Next() {
+		var o OrderView
+		rows.Scan(&o.ID, &o.Username, &o.Type, &o.ResWhen, &o.Total, &o.Status, &o.CreatedAt, &o.Note)
+		out = append(out, o)
+	}
+	rows.Close()
+	for i := range out {
+		ir, err := a.db.Query(`SELECT m.name,i.quantity,i.price FROM order_items i JOIN menu_items m ON m.id=i.menu_item_id WHERE i.order_id=?`, out[i].ID)
+		if err != nil {
+			continue
+		}
+		for ir.Next() {
+			var it OrderItemView
+			ir.Scan(&it.Name, &it.Qty, &it.Price)
+			out[i].Items = append(out[i].Items, it)
+		}
+		ir.Close()
+	}
+	return out
+}
+
+func (a *App) orderHistory(w http.ResponseWriter, r *http.Request, u *User) {
+	p := a.page(w, r)
+	if u.Role == "admin" {
+		p.Data = a.listOrders(0)
+	} else {
+		p.Data = a.listOrders(u.ID)
+	}
+	a.render(w, "orders", p, http.StatusOK)
+}
+
+// ลูกค้ายกเลิกได้เฉพาะออเดอร์ของตัวเองที่ยังรอดำเนินการ
+func (a *App) orderCancel(w http.ResponseWriter, r *http.Request, u *User) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	res, err := a.db.Exec(`UPDATE orders SET status='cancelled' WHERE id=? AND user_id=? AND status='pending'`, id, u.ID)
+	if err != nil {
 		a.serverErr(w, err)
 		return
 	}
-	http.Redirect(w, r, "/dashboard?ok=1", http.StatusSeeOther)
+	if n, _ := res.RowsAffected(); n == 0 {
+		http.Error(w, "ยกเลิกไม่ได้ (ไม่ใช่ออเดอร์ของคุณ หรือไม่ได้อยู่ในสถานะรอดำเนินการ)", http.StatusForbidden)
+		return
+	}
+	http.Redirect(w, r, "/my-orders?ok=1", http.StatusSeeOther)
+}
+
+// แอดมินเปลี่ยนสถานะออเดอร์
+func (a *App) orderStatus(w http.ResponseWriter, r *http.Request, u *User) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	st := r.PostFormValue("status")
+	switch st {
+	case "pending", "preparing", "done", "cancelled":
+	default:
+		http.Error(w, "สถานะไม่ถูกต้อง", http.StatusBadRequest)
+		return
+	}
+	a.db.Exec(`UPDATE orders SET status=? WHERE id=?`, st, id)
+	http.Redirect(w, r, "/my-orders?ok=1", http.StatusSeeOther)
 }
 
 // ---------- สมัคร / เข้าสู่ระบบ ----------
@@ -666,12 +857,13 @@ func (a *App) resCreate(w http.ResponseWriter, r *http.Request, u *User) {
 		a.render(w, "reservation_form", p, 400)
 		return
 	}
-	if _, err := a.db.Exec(`INSERT INTO reservations(user_id,name,phone,party_size,when_at,note) VALUES(?,?,?,?,?,?)`,
-		u.ID, x.Name, x.Phone, x.PartySize, x.When, x.Note); err != nil {
+	var newID int64
+	if err := a.db.QueryRow(`INSERT INTO reservations(user_id,name,phone,party_size,when_at,note) VALUES(?,?,?,?,?,?) RETURNING id`,
+		u.ID, x.Name, x.Phone, x.PartySize, x.When, x.Note).Scan(&newID); err != nil {
 		a.serverErr(w, err)
 		return
 	}
-	http.Redirect(w, r, "/dashboard?ok=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/order?reservation="+strconv.FormatInt(newID, 10)+"&new=1", http.StatusSeeOther)
 }
 
 func (a *App) ownedRes(w http.ResponseWriter, r *http.Request, u *User, adminOK bool) (Reservation, bool) {
@@ -795,6 +987,9 @@ func (a *App) menuCreate(w http.ResponseWriter, r *http.Request, u *User) {
 
 func (a *App) menuDelete(w http.ResponseWriter, r *http.Request, u *User) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	a.db.Exec(`DELETE FROM menu_items WHERE id=?`, id)
+	if _, err := a.db.Exec(`DELETE FROM menu_items WHERE id=?`, id); err != nil {
+		http.Error(w, "ลบไม่ได้ เพราะเมนูนี้อยู่ในประวัติการสั่งอาหาร", http.StatusConflict)
+		return
+	}
 	http.Redirect(w, r, "/admin/menu?ok=1", http.StatusSeeOther)
 }

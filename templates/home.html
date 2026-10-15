@@ -2,6 +2,10 @@
 {{define "content"}}
 <h1>เมนูอาหาร</h1>
 <a class="btn" href="/reservations/new">จองโต๊ะ</a>
+{{if .User}}
+<a class="btn sec" href="/order">🛒 สั่งอาหาร (หลายรายการ / พร้อมจองโต๊ะ)</a>
+<a class="btn sec" href="/my-orders">ประวัติการสั่ง</a>
+{{end}}
 {{if .Data}}
 <div class="menu-grid grid">
   {{range .Data}}
@@ -14,13 +18,12 @@
       <h3 style="margin:.2rem 0">{{.Name}}</h3>
       <p>{{.Description}}</p>
       <div class="price" style="margin-bottom:10px;">{{printf "%.0f" .Price}} บาท</div>
-
       {{if $.User}}
       <form action="/orders" method="POST" style="display:flex;gap:5px;align-items:center;">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <input type="hidden" name="menu_id" value="{{.ID}}">
         <input type="number" name="quantity" value="1" min="1" max="20" style="width:60px;padding:5px;">
-        <button type="submit" class="btn sm" style="flex:1;">🛒 สั่งอาหาร</button>
+        <button type="submit" class="btn sm" style="flex:1;">🛒 สั่งเลย</button>
       </form>
       {{else}}
       <a class="muted" href="/login">เข้าสู่ระบบเพื่อสั่งอาหาร</a>

@@ -1,0 +1,46 @@
+{{define "title"}}สั่งอาหาร{{end}}
+{{define "content"}}
+<h1>สั่งอาหาร</h1>
+{{if .Data.NewRes}}
+<div class="ok">จองโต๊ะสำเร็จ! สั่งอาหารล่วงหน้าไว้เลยก็ได้ หรือ <a href="/dashboard">ข้ามไปก่อน</a></div>
+{{end}}
+<form method="post" action="/orders">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <div class="card">
+    <strong>รูปแบบการสั่ง</strong>
+    <label><input type="radio" name="order_type" value="normal" style="width:auto" {{if ne .Data.Type "reservation"}}checked{{end}}> สั่งอาหารปกติ (ไม่ผูกกับการจอง)</label>
+    <label><input type="radio" name="order_type" value="reservation" style="width:auto" {{if eq .Data.Type "reservation"}}checked{{end}}> สั่งล่วงหน้าพร้อมการจองโต๊ะ</label>
+    {{if .Data.Reservations}}
+    <label>เลือกการจอง (ใช้เมื่อเลือก "สั่งล่วงหน้าพร้อมการจองโต๊ะ")</label>
+    <select name="reservation_id">
+      {{range .Data.Reservations}}
+      <option value="{{.ID}}" {{if eq .ID $.Data.Selected}}selected{{end}}>{{.When}} · {{.Name}} · {{.PartySize}} คน</option>
+      {{end}}
+    </select>
+    {{else}}
+    <p class="muted">ยังไม่มีการจองที่กำลังจะถึง <a href="/reservations/new">จองโต๊ะก่อน</a> เพื่อสั่งอาหารล่วงหน้า</p>
+    {{end}}
+  </div>
+
+  <div class="card table">
+    <table>
+      <tr><th>เมนู</th><th>ราคา</th><th>จำนวน</th></tr>
+      {{range .Data.Menu}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td class="price">{{printf "%.0f" .Price}}</td>
+        <td><input type="number" name="qty_{{.ID}}" value="0" min="0" max="50" style="width:80px"></td>
+      </tr>
+      {{end}}
+    </table>
+  </div>
+
+  <div class="card">
+    <label>หมายเหตุถึงร้าน (ไม่บังคับ)</label>
+    <textarea name="note" rows="2" maxlength="200"></textarea>
+    <button class="btn">ยืนยันการสั่ง</button>
+    <a class="btn sec" href="/">ยกเลิก</a>
+  </div>
+</form>
+{{end}}
