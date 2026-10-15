@@ -64,6 +64,7 @@ type MenuItem struct {
 	Description string
 	Price       float64
 	Category    string
+	ImageURL    string
 }
 
 type Review struct {
@@ -125,7 +126,8 @@ CREATE TABLE IF NOT EXISTS sessions(
 CREATE TABLE IF NOT EXISTS menu_items(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
-  price REAL NOT NULL, category TEXT NOT NULL);
+  price REAL NOT NULL, category TEXT NOT NULL,
+  image_url TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS reservations(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -156,7 +158,8 @@ CREATE TABLE IF NOT EXISTS sessions(
 CREATE TABLE IF NOT EXISTS menu_items(
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
-  price DOUBLE PRECISION NOT NULL, category TEXT NOT NULL);
+  price DOUBLE PRECISION NOT NULL, category TEXT NOT NULL,
+  image_url TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS reservations(
   id BIGSERIAL PRIMARY KEY,
   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -223,6 +226,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("GET /{$}", app.home)
 	mux.HandleFunc("GET /register", app.registerForm)
 	mux.HandleFunc("POST /register", app.register)
@@ -262,12 +266,12 @@ func (a *App) seed() {
 	a.db.QueryRow(`SELECT COUNT(*) FROM menu_items`).Scan(&n)
 	if n == 0 {
 		for _, m := range []MenuItem{
-			{Name: "ผัดกะเพราหมูสับไข่ดาว", Description: "เผ็ดร้อนหอมใบกะเพรา", Price: 70, Category: "จานเดียว"},
-			{Name: "ต้มยำกุ้งน้ำข้น", Description: "กุ้งแม่น้ำตัวโต เปรี้ยวเผ็ดกลมกล่อม", Price: 220, Category: "ต้ม/แกง"},
-			{Name: "ส้มตำไทย", Description: "รสจัดจ้าน", Price: 60, Category: "ยำ/ตำ"},
-			{Name: "ชาไทยเย็น", Description: "หอมมัน หวานน้อยได้", Price: 45, Category: "เครื่องดื่ม"},
+			{Name: "ผัดกะเพราหมูสับไข่ดาว", Description: "เผ็ดร้อนหอมใบกะเพรา", Price: 70, Category: "จานเดียว", ImageURL: "/static/กระเพรา.jpg"},
+			{Name: "ต้มยำกุ้งน้ำข้น", Description: "กุ้งแม่น้ำตัวโต เปรี้ยวเผ็ดกลมกล่อม", Price: 220, Category: "ต้ม/แกง", ImageURL: "/static/ต้มยำกุ้งน้ำข้น.jpg"},
+			{Name: "ส้มตำไทย", Description: "รสจัดจ้าน", Price: 60, Category: "ยำ/ตำ", ImageURL: "/static/ส้มตำไทย.jpg"},
+			{Name: "ชาไทยเย็น", Description: "หอมมัน หวานน้อยได้", Price: 45, Category: "เครื่องดื่ม", ImageURL: "/static/images.jpg"},
 		} {
-			a.db.Exec(`INSERT INTO menu_items(name,description,price,category) VALUES(?,?,?,?)`, m.Name, m.Description, m.Price, m.Category)
+			a.db.Exec(`INSERT INTO menu_items(name,description,price,category,image_url) VALUES(?,?,?,?,?)`, m.Name, m.Description, m.Price, m.Category, m.ImageURL)
 		}
 	}
 }
@@ -391,7 +395,7 @@ func (a *App) serverErr(w http.ResponseWriter, err error) {
 // ---------- หน้าแรก / เมนู ----------
 
 func (a *App) menuItems() []MenuItem {
-	rows, err := a.db.Query(`SELECT id,name,description,price,category FROM menu_items ORDER BY category,name`)
+	rows, err := a.db.Query(`SELECT id,name,description,price,category,COALESCE(image_url,'') FROM menu_items ORDER BY category,name`)
 	if err != nil {
 		return nil
 	}
@@ -399,12 +403,11 @@ func (a *App) menuItems() []MenuItem {
 	var out []MenuItem
 	for rows.Next() {
 		var m MenuItem
-		rows.Scan(&m.ID, &m.Name, &m.Description, &m.Price, &m.Category)
+		rows.Scan(&m.ID, &m.Name, &m.Description, &m.Price, &m.Category, &m.ImageURL)
 		out = append(out, m)
 	}
 	return out
 }
-
 func (a *App) home(w http.ResponseWriter, r *http.Request) {
 	p := a.page(w, r)
 	p.Data = a.menuItems()

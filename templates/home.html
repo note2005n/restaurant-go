@@ -1,9 +1,20 @@
-{{define "title"}}เมนูอาหาร{{end}}
-{{define "content"}}
-<h1>เมนูอาหาร</h1>
-<a class="btn" href="/reservations/new">จองโต๊ะ</a>
-<div class="grid">
-{{range .Data}}<div class="card"><div class="muted">{{.Category}}</div><strong>{{.Name}}</strong><div>{{.Description}}</div><div class="price">{{printf "%.0f" .Price}} บาท</div></div>
-{{else}}<p>ยังไม่มีเมนู</p>{{end}}
+{{if .Data}}
+<div class="menu-grid">
+  {{range .Data}}
+  <div class="menu-card">
+    
+    <!-- นำโค้ดนี้มาวางไว้ตรงนี้ -->
+    {{if .ImageURL}}
+      <img src="{{.ImageURL}}" alt="{{.Name}}" style="width: 100%; height: 180px; object-fit: cover; border-radius: 8px 8px 0 0;">
+    {{end}}
+
+    <div style="padding: 15px;">
+      <span class="category">{{.Category}}</span>
+      <h3>{{.Name}}</h3>
+      <p>{{.Description}}</p>
+      <div class="price">{{.Price}} บาท</div>
+    </div>
+  </div>
+  {{end}}
 </div>
 {{end}}
